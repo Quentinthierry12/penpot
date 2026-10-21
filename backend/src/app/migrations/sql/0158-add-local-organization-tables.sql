@@ -15,9 +15,19 @@ CREATE TABLE organization (
 CREATE UNIQUE INDEX organization__slug__idx ON organization (slug);
 CREATE INDEX organization__owner_id__idx ON organization (owner_id);
 
+-- Penpot dropped its generic update_modified_at() trigger function in
+-- migration 0037, so this migration ships its own.
+CREATE OR REPLACE FUNCTION organization__update_modified_at()
+  RETURNS TRIGGER AS $$
+  BEGIN
+    NEW.modified_at := clock_timestamp();
+    RETURN NEW;
+  END;
+$$ LANGUAGE plpgsql;
+
 CREATE TRIGGER organization__modified_at__tgr
 BEFORE UPDATE ON organization
-   FOR EACH ROW EXECUTE PROCEDURE update_modified_at();
+   FOR EACH ROW EXECUTE FUNCTION organization__update_modified_at();
 
 CREATE TABLE organization_member_rel (
   organization_id uuid NOT NULL REFERENCES organization(id) ON DELETE CASCADE DEFERRABLE,
@@ -62,4 +72,4 @@ CREATE TABLE organization_sso (
 
 CREATE TRIGGER organization_sso__modified_at__tgr
 BEFORE UPDATE ON organization_sso
-   FOR EACH ROW EXECUTE PROCEDURE update_modified_at();
+   FOR EACH ROW EXECUTE FUNCTION organization__update_modified_at();
