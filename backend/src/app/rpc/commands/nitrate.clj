@@ -15,6 +15,7 @@
    [app.common.schema :as sm]
    [app.common.time :as ct]
    [app.common.types.organization :as cto]
+   [app.common.uuid :as uuid]
    [app.config :as cf]
    [app.db :as db]
    [app.http.session :as session]
@@ -23,14 +24,13 @@
    [app.nitrate :as nitrate]
    [app.rpc :as rpc]
    [app.rpc.commands.teams :as teams]
-   [app.rpc.permissions :as perms]
    [app.rpc.doc :as-alias doc]
    [app.rpc.helpers :as rph]
    [app.rpc.nitrate.emails-helper :as neh]
    [app.rpc.nitrate.organization-helper :as noh]
    [app.rpc.notifications :as notifications]
+   [app.rpc.permissions :as perms]
    [app.util.services :as sv]
-   [app.common.uuid :as uuid]
    [buddy.core.codecs :as bc]
    [clojure.string :as str]))
 
@@ -112,6 +112,11 @@
         suffix (subs (str organization-id) 0 8)]
     (str (if (str/blank? base) "organization" base) "-" suffix)))
 
+;; The owner-only endpoints of the local admin console below are
+;; marked `::nitrate/sso false`: they check ownership themselves, and
+;; going through the organization SSO would lock the owner out of the
+;; console, the one place to fix or disable a broken SSO setup.
+
 (defn- assert-organization-owner!
   [cfg profile-id organization-id]
   (let [organization (db/get cfg :organization {:id organization-id})]
@@ -131,8 +136,8 @@
   (let [organization-id (uuid/next)
         slug            (organization-slug name organization-id)
         default-team    (teams/create-team cfg {:profile-id profile-id
-                                                 :name "Personal Projects"
-                                                 :is-default true})
+                                                :name "Personal Projects"
+                                                :is-default true})
         default-team-id (:id default-team)]
     (db/insert! cfg :organization
                 {:id organization-id
@@ -158,6 +163,7 @@
 (sv/defmethod ::rename-organization
   "Rename an organization owned by the current profile."
   {::rpc/auth true
+   ::nitrate/sso false
    ::sm/params [:map
                 [:organization-id ::sm/uuid]
                 [:name [:and ::sm/text [:fn #(<= 1 (count %) 120)]]]]
@@ -174,6 +180,7 @@
 (sv/defmethod ::delete-organization
   "Delete an empty organization owned by the current profile."
   {::rpc/auth true
+   ::nitrate/sso false
    ::db/transaction true
    ::sm/params [:map [:organization-id ::sm/uuid]]
    ::sm/result :nil}
@@ -193,6 +200,7 @@
 (sv/defmethod ::create-organization-team
   "Create a team under an organization owned by the current profile."
   {::rpc/auth true
+   ::nitrate/sso false
    ::db/transaction true
    ::sm/params [:map
                 [:organization-id ::sm/uuid]
@@ -223,6 +231,7 @@
 (sv/defmethod ::get-organization-sso-settings
   "Get the OIDC settings for an organization owned by the current profile."
   {::rpc/auth true
+   ::nitrate/sso false
    ::sm/params [:map [:organization-id ::sm/uuid]]
    ::sm/result [:maybe [:map
                         [:active ::sm/boolean]
@@ -237,6 +246,7 @@
 (sv/defmethod ::set-organization-sso-settings
   "Save OIDC settings for an organization owned by the current profile."
   {::rpc/auth true
+   ::nitrate/sso false
    ::sm/params schema:organization-sso-settings
    ::sm/result [:map [:active ::sm/boolean]]}
   [cfg {:keys [::rpc/profile-id organization-id active provider client-id client-secret issuer]}]
@@ -287,6 +297,7 @@
 (sv/defmethod ::get-organization-permissions-settings
   "Get the organization permission policy for its owner."
   {::rpc/auth true
+   ::nitrate/sso false
    ::sm/params [:map [:organization-id ::sm/uuid]]
    ::sm/result schema:organization-permissions}
   [cfg {:keys [::rpc/profile-id organization-id]}]
@@ -297,6 +308,7 @@
 (sv/defmethod ::set-organization-permissions-settings
   "Update team and invitation policy for an organization owner."
   {::rpc/auth true
+   ::nitrate/sso false
    ::sm/params [:map
                 [:organization-id ::sm/uuid]
                 [:permissions schema:organization-permissions]]
@@ -321,6 +333,7 @@
 (sv/defmethod ::get-organization-audit-log
   "Return recent audit events for an organization owned by the current profile."
   {::rpc/auth true
+   ::nitrate/sso false
    ::sm/params [:map [:organization-id ::sm/uuid]]
    ::sm/result [:vector schema:organization-audit-event]}
   [cfg {:keys [::rpc/profile-id organization-id]}]
@@ -349,6 +362,7 @@
 (sv/defmethod ::get-organization-admin-summary
   "List teams and organization members for the owner console."
   {::rpc/auth true
+   ::nitrate/sso false
    ::sm/params [:map [:organization-id ::sm/uuid]]
    ::sm/result schema:organization-admin-summary}
   [{:keys [::db/pool] :as cfg} {:keys [::rpc/profile-id organization-id]}]
@@ -380,6 +394,7 @@
 (sv/defmethod ::remove-organization-member
   "Remove an organization member from its teams and organization."
   {::rpc/auth true
+   ::nitrate/sso false
    ::db/transaction true
    ::sm/params [:map
                 [:organization-id ::sm/uuid]
@@ -389,8 +404,8 @@
    {:keys [::rpc/profile-id organization-id member-id]}]
   (assert-organization-owner! cfg profile-id organization-id)
   (let [membership (db/get* conn :organization-member-rel
-                           {:organization-id organization-id
-                            :profile-id member-id})]
+                            {:organization-id organization-id
+                             :profile-id member-id})]
     (when-not membership
       (ex/raise :type :not-found :code :organization-member-does-not-exist))
     (when (= profile-id member-id)
