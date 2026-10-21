@@ -148,13 +148,6 @@
              (some? days-until-expiry)
              (some? expiration-date-text))
 
-        subscription-type
-        (if nitrate? (:type nitrate-license) (get-subscription-type (-> profile :props :subscription)))
-
-        team-count (count teams)
-
-        account-age-days (dnt/account-age-days profile)
-
         teams-loaded? (seq teams)
 
         no-organizations-created? (mf/with-memo [teams]
@@ -163,24 +156,8 @@
                                               vals
                                               (not-any? :organization))))
 
-        handle-click
-        (mf/use-fn
-         (mf/deps account-age-days subscription-type team-count)
-         (fn []
-           (st/emit!
-            (ev/event
-             (cond-> {::ev/name "open-subscription-modal"
-                      ::ev/origin "dashboard:promotional-banner"
-                      :product "nitrate:enterprise"
-                      :source "frontend"
-                      :has-teams (pos? team-count)
-                      :team-count team-count}
-               (some? account-age-days)
-               (assoc :account-age-days account-age-days)))
-            (dnt/show-nitrate-popup :nitrate-form
-                                    (cond-> {:subscription-start-origin "dashboard:promotional-banner"}
-                                      (= subscription-type "unlimited")
-                                      (assoc :show-contact-sales-option true))))))
+        handle-go-to-console
+        (mf/use-fn #(dnt/go-to-nitrate-ac))
 
         handle-go-to-cc
         (mf/use-fn
@@ -210,19 +187,23 @@
                       :class (stl/css :nitrate-bottom-button)
                       :on-click handle-go-to-cc} (tr "nitrate.activation-success.create-organization")]]]
 
-       ;; Banner for users without nitrate license
+       ;; Banner for users without nitrate license. The fork's admin
+       ;; console is local and needs no license, so the banner leads
+       ;; there instead of the Nitrate offer.
        (when (not nitrate?)
          [:div {:class (stl/css :nitrate-banner :highlighted)}
           [:div {:class (stl/css :nitrate-content)}
-           [:span {:class (stl/css :nitrate-title)} (tr "subscription.dashboard.banner.unlock-features")]]
+           [:span {:class (stl/css :nitrate-title)} (tr "subscription.settings.admin-console")]]
           [:div {:class (stl/css :nitrate-content)}
-           [:span {:class (stl/css :nitrate-info)} (tr "subscription.dashboard.banner.unlock-features-description-text")]
            [:> button* {:variant "primary"
                         :type "button"
                         :class (stl/css :nitrate-bottom-button)
-                        :on-click handle-click} (if (:subscription profile)
-                                                  (tr "subscription.dashboard.banner.upgrade-nitrate")
-                                                  (tr "nitrate.form.try-free"))]]]))
+                        :on-click (if no-organizations-created?
+                                    handle-go-to-cc
+                                    handle-go-to-console)}
+            (if no-organizations-created?
+              (tr "dashboard.create-new-organization")
+              (tr "dashboard.go-to-admin-console"))]]]))
 
      ;; Banner for users with nitrate license almost expired or expired
      (when show-subscription-warning?

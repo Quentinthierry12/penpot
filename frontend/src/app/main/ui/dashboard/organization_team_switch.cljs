@@ -16,7 +16,6 @@
    [app.common.uuid :as uuid]
    [app.config :as cf]
    [app.main.data.common :as dcm]
-   [app.main.data.event :as ev]
    [app.main.data.modal :as modal]
    [app.main.data.nitrate :as dnt]
    [app.main.data.team :as dtm]
@@ -409,10 +408,7 @@
         show-team-options-button?
         (or (not (:is-default team)) can-leave-organization?)
 
-        subscription-type (get-subscription-type (-> profile :props :subscription))
         current-team-subscription-type (get-subscription-type (:subscription team))
-        team-count (count teams)
-        account-age-days (dnt/account-age-days profile)
         is-valid-license? (dnt/is-valid-license? profile)
 
         ;; Keyed by `organization-bucket-id`, not raw `:id`: every
@@ -526,29 +522,14 @@
                  (when-let [target-team-id (team-select-target team-id team)]
                    (st/emit! (dcm/go-to-dashboard-recent :team-id target-team-id))))))))
 
+        ;; The fork's admin console is local and needs no Nitrate
+        ;; license: it creates the organization itself.
         on-create-organization
         (mf/use-fn
-         (mf/deps account-age-days profile subscription-type team-count)
          (fn []
            (reset! show-menu* false)
-           (if (and (not= subscription-type "unlimited") is-valid-license?)
-             (dnt/go-to-nitrate-ac-create-organization
-              "dashboard:organization-switcher")
-             (st/emit!
-              (ev/event
-               (cond-> {::ev/name "open-subscription-modal"
-                        ::ev/origin "dashboard:organization-switcher"
-                        :product "nitrate:enterprise"
-                        :source "frontend"
-                        :has-teams (pos? team-count)
-                        :team-count team-count}
-                 (some? account-age-days)
-                 (assoc :account-age-days account-age-days)))
-              (dnt/show-nitrate-popup
-               :nitrate-form
-               (cond-> {:subscription-start-origin "dashboard:organization-switcher"}
-                 (= subscription-type "unlimited")
-                 (assoc :show-contact-sales-option true)))))))
+           (dnt/go-to-nitrate-ac-create-organization
+            "dashboard:organization-switcher")))
 
         ;; "Go to admin console" targets the active team's organization
         ;; (the one with the tick), not the one previewed on the left
@@ -669,7 +650,9 @@
                                     :on-select on-organization-select
                                     :on-create-organization on-create-organization
                                     :admin-console-href admin-console-href
-                                    :valid-license is-valid-license?
+                                    ;; The fork's admin console is local: its
+                                    ;; link needs no Nitrate license.
+                                    :valid-license true
                                     :on-context-menu on-organization-context-menu
                                     :on-dismiss-context-menu on-dismiss-context-menu}]
          [:> teams-column* {:teams selected-organization-teams
