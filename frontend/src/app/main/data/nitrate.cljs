@@ -70,21 +70,18 @@
    (build-admin-console-url cf/public-uri path query-params))
   ([public-uri path query-params]
    (dm/str
-    (cond-> (u/join public-uri "admin-console/" path)
-      (seq query-params) (assoc :query (u/map->query-string query-params))))))
+    (assoc (u/uri public-uri)
+           :query (u/map->query-string
+                   (merge {:screen "enterprise-admin"}
+                          query-params))))))
 
 (defn build-admin-console-href
   ([]
    (build-admin-console-url ""))
   ([{:keys [organization-id organization-slug]}]
-   (if (and organization-id organization-slug)
-     (let [path (dm/str "organization/"
-                        (u/percent-encode organization-slug)
-                        "/"
-                        (u/percent-encode (str organization-id))
-                        "/people/")]
-       (build-admin-console-url path))
-     (build-admin-console-url ""))))
+   (build-admin-console-url "" (cond-> {}
+                                  organization-id (assoc :organization-id organization-id)
+                                  organization-slug (assoc :organization-slug organization-slug)))))
 
 (defn go-to-nitrate-ac
   ([]

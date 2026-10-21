@@ -70,6 +70,7 @@
                 (assoc :auth-uri  auth-uri)
                 (assoc :user-uri  user-uri)
                 (assoc :jwks-uri jwks-uri)
+                (assoc :discovered-issuer (get data :issuer))
                 (assoc :logout-uri logout-uri)))
 
           (raise-invalid-sso-config
@@ -460,11 +461,12 @@
 
 (defn build-auth-redirect-uri
   [provider token]
-  (let [params {:client_id (:client-id provider)
-                :redirect_uri (build-redirect-uri)
-                :response_type "code"
-                :state token
-                :scope (str/join " " (:scopes provider []))}
+  (let [params (cond-> {:client_id (:client-id provider)
+                        :redirect_uri (build-redirect-uri)
+                        :response_type "code"
+                        :state token
+                        :scope (str/join " " (:scopes provider []))}
+                 (:nonce provider) (assoc :nonce (:nonce provider)))
         query  (u/map->query-string params)]
     (-> (u/uri (:auth-uri provider))
         (assoc :query query)
@@ -496,8 +498,6 @@
 
     (l/trc :hint "fetch access token"
            :provider (:id provider)
-           :client-id (:client-id provider)
-           :client-secret (d/obfuscate-string (:client-secret provider))
            :grant-type (:grant_type params)
            :redirect-uri (:redirect_uri params))
 
@@ -509,16 +509,15 @@
                     :token/type       (get data :token_type)
                     :token/expires-in (get data :expires_in)}]
           (l/trc :hint "access token fetched"
-                 :token-id (:token/id data)
+                 :has-id-token (some? (:token/id data))
                  :token-type (:token/type data)
-                 :token (:token/access data))
+                 :expires-in (:token/expires-in data))
           data)
         (ex/raise :type :internal
                   :code :unable-to-fetch-access-token
                   :hint "unable to fetch access token"
                   :request-uri (:uri req)
-                  :response-status status
-                  :response-body body)))))
+                  :response-status status)))))
 
 (defn- process-user-info
   [provider tdata info]
@@ -560,15 +559,13 @@
         response (http/req cfg params {:skip-ssrf-check? (:skip-ssrf-check? provider)})]
 
     (l/trc :hint "user info response"
-           :status (:status response)
-           :body   (:body response))
+           :status (:status response))
 
     (when-not (int-in-range? (:status response) 200 300)
       (ex/raise :type :internal
                 :code :unable-to-retrieve-user-info
                 :hint "unable to retrieve user info"
-                :http-status (:status response)
-                :http-body (:body response)))
+                :http-status (:status response)))
 
     (-> response :body json/decode)))
 
@@ -585,6 +582,33 @@
     (catch Throwable cause
       (l/warn :hint "unable to get user info from JWT token (unexpected exception)"
               :cause cause))))
+
+(defn- validate-organization-id-token!
+  [provider state claims]
+  (let [audiences (let [aud (:aud claims)]
+                    (cond
+                      (string? aud) #{aud}
+                      (sequential? aud) (set aud)
+                      :else #{}))
+        now       (ct/seconds (ct/now))
+        expires   (:exp claims)
+        issued-at (:iat claims)
+        multiple-audiences? (> (count audiences) 1)]
+    (when-not (and (map? claims)
+                   (= (:issuer state) (:iss claims))
+                   (not (str/blank? (:sub claims)))
+                   (contains? audiences (:client-id provider))
+                   (or (not multiple-audiences?)
+                       (= (:client-id provider) (:azp claims)))
+                   (number? expires)
+                   (> expires now)
+                   (number? issued-at)
+                   (<= issued-at (+ now 60))
+                   (some? (:nonce state))
+                   (= (:nonce state) (:nonce claims)))
+      (raise-invalid-sso-config
+       :hint "organization ID Token failed issuer, audience, time or nonce validation"))
+    claims))
 
 (def ^:private schema:info
   [:map
@@ -614,6 +638,8 @@
   [cfg provider state code]
   (let [tdata  (fetch-access-token cfg provider code)
         claims (get-id-token-claims provider tdata)
+        _      (when (:organization-id state)
+                 (validate-organization-id-token! provider state claims))
 
         info   (case (select-user-info-source (get provider :user-info-source))
                  :token    (dissoc claims :exp :iss :iat :aud :sid)
@@ -624,9 +650,12 @@
         info   (process-user-info provider tdata info)]
 
     (if (valid-info? info)
-      (l/trc :hint "received valid user info object" :info info)
+      (l/trc :hint "received valid user info object"
+             :email-verified (:email-verified info))
       (do
-        (l/warn :hint "received incomplete user info object (please set correct scopes)" :info info)
+        (l/warn :hint "received incomplete user info object (please set correct scopes)"
+                :has-email (some? (:email info))
+                :has-fullname (some? (:fullname info)))
         (ex/raise :type :internal
                   :code :incomplete-user-info
                   :hint "incomplete user info"
@@ -897,21 +926,67 @@
   [sso]
   (non-blank-uri (:issuer sso)))
 
+(defn- secure-organization-sso-uri?
+  [value]
+  (let [{:keys [scheme host]} (u/uri value)
+        scheme (some-> scheme str/lower)
+        host   (some-> host str/lower)]
+    (or (= scheme "https")
+        (and (= scheme "http")
+             (contains? #{"localhost" "127.0.0.1" "::1"} host)))))
+
 (defn prepare-organization-sso-provider
   "Build an OIDC provider map dynamically from the Nitrate organization SSO config.
    Uses OIDC discovery via :issuer when token/auth/user URIs are absent."
   [cfg {:keys [client-id client-secret issuer]}]
-  (prepare-oidc-provider cfg
-                         {:type             "oidc"
-                          :client-id        client-id
-                          :client-secret    client-secret
-                          :base-uri         (some-> (non-blank-uri issuer)
-                                                    (str/rtrim "/")
-                                                    (str "/"))
-                          :scopes           default-oidc-scopes
-                          ;; Organization SSO is configured by customers; discovery
-                          ;; and JWKS failures must surface as controlled errors.
-                          :strict-jwks?     true}))
+  (when-not (secure-organization-sso-uri? issuer)
+    (raise-invalid-sso-config
+     :hint "organization SSO issuer must use HTTPS (HTTP is allowed only for localhost testing)"))
+  (let [provider (prepare-oidc-provider cfg
+                                        {:type             "oidc"
+                                         :client-id        client-id
+                                         :client-secret    client-secret
+                                         :base-uri         (some-> (non-blank-uri issuer)
+                                                                   (str/rtrim "/")
+                                                                   (str "/"))
+                                         :scopes           default-oidc-scopes
+                                         ;; Organization SSO is configured by customers; discovery
+                                         ;; and JWKS failures must surface as controlled errors.
+                                         :strict-jwks?     true})]
+    (when-not (every? secure-organization-sso-uri?
+                      (remove nil? [(:token-uri provider) (:auth-uri provider)
+                                    (:user-uri provider) (:jwks-uri provider)]))
+      (raise-invalid-sso-config
+       :hint "OIDC discovery endpoints must use HTTPS (HTTP is allowed only for localhost testing)"))
+    (when-not (= issuer (:discovered-issuer provider))
+      (raise-invalid-sso-config
+       :hint "OIDC discovery issuer does not match the configured issuer"))
+    provider))
+
+(defn- same-origin-url?
+  [candidate base]
+  (let [candidate (u/uri candidate)
+        base      (u/uri base)
+        scheme    #(some-> % :scheme str/lower)
+        host      #(some-> % :host str/lower)
+        port      (fn [uri]
+                    (or (:port uri)
+                        (case (some-> uri :scheme str/lower)
+                          "https" 443
+                          "http" 80
+                          nil)))]
+    (and candidate base
+         (= (scheme candidate) (scheme base))
+         (= (host candidate) (host base))
+         (= (port candidate) (port base)))))
+
+(defn- safe-organization-sso-dest-url
+  [dest-url]
+  (let [base (str (cf/get :public-uri))]
+    (if (and (some? dest-url)
+             (same-origin-url? dest-url base))
+      (str (u/uri dest-url))
+      base)))
 
 (defn build-organization-sso-auth-redirect-uri
   "Build the OIDC authorization redirect URI for an organization SSO config.
@@ -919,17 +994,20 @@
   [cfg sso & {:keys [dest-url organization-id provider]}]
   (let [organization-id (or organization-id (:organization-id sso))
         issuer          (organization-sso-discovery-uri sso)
-        dest-url        (or dest-url (str (cf/get :public-uri)))]
+        dest-url        (safe-organization-sso-dest-url dest-url)]
     (when-not issuer
       (raise-invalid-sso-config
        :hint "missing issuer"
        :organization-id organization-id))
     (try
       (let [oidc-provider (or provider (prepare-organization-sso-provider cfg sso))
+            nonce         (str (uuid/next))
+            oidc-provider (assoc oidc-provider :nonce nonce)
             state-token   (tokens/generate cfg {:iss             "oidc"
                                                 :dest-url        dest-url
                                                 :organization-id organization-id
-                                                :issuer          issuer
+                                                :issuer          (:discovered-issuer oidc-provider)
+                                                :nonce           nonce
                                                 :exp             (ct/in-future "4h")})]
         (build-auth-redirect-uri oidc-provider state-token))
       (catch Throwable cause
@@ -1026,20 +1104,35 @@
   :dest-url — exchange the authorization code with the OIDC provider to
   verify authentication actually occurred, then redirect back to dest-url."
   [cfg request state code]
-  (let [dest-url (:dest-url state)]
+  (let [dest-url (safe-organization-sso-dest-url (:dest-url state))]
     (try
       (let [organization-id (:organization-id state)
             sso             (nitrate/call cfg :get-organization-sso {:organization-id organization-id})
+            _               (when-not (and organization-id (:active sso))
+                              (ex/raise :type :authentication
+                                        :code :organization-sso-not-active))
             provider        (prepare-organization-sso-provider cfg sso)
-            _info           (get-info cfg provider state code)
+            _               (when-not (= (:issuer state) (:discovered-issuer provider))
+                              (ex/raise :type :authentication
+                                        :code :organization-sso-config-changed))
+            info            (get-info cfg provider state code)
             session         (session/get-session request)
+            profile         (when session
+                              (db/get cfg :profile {:id (:profile-id session)}))
+            profile-email   (some-> profile :email profile/clean-email)
+            identity-email  (some-> info :email profile/clean-email)
+            _               (when-not (and session
+                                           profile
+                                           (:email-verified info)
+                                           (= profile-email identity-email))
+                              (ex/raise :type :authentication
+                                        :code :organization-sso-identity-mismatch))
             exp             (ct/in-future {:hours 4})]
-        (when (and session organization-id)
-          (let [props (-> (or (:props session) {})
-                          (update :sso assoc organization-id exp))]
-            (session/update-session (::session/manager cfg) (assoc session :props props))
-            (submit-organization-sso-auth-event
-             cfg request (:profile-id session) organization-id "organization-sso-token-issued")))
+        (let [props (-> (or (:props session) {})
+                        (update :sso assoc organization-id exp))]
+          (session/update-session (::session/manager cfg) (assoc session :props props))
+          (submit-organization-sso-auth-event
+           cfg request (:profile-id session) organization-id "organization-sso-token-issued"))
         (submit-organization-sso-auth-event
          cfg request (:profile-id session) organization-id "organization-sso-auth-succeeded")
         (redirect-response dest-url))

@@ -21,6 +21,8 @@ machine.
 
 * In the [Install with Docker][2] section, you can find the official Docker installation guide.
 
+* For this fork, see the [Proxmox VM deployment guide][9], including its Docker Compose setup and notes on native installation.
+
 * In the [Install with Kubernetes][7] section, you can find the official Kubernetes installation guide.
 
 * In the [Configuration][3] section, you can find all the customization options you can set up after installing.
@@ -51,3 +53,4 @@ any issue that may arise as well as report it comprehensively.
 [6]: /technical-guide/developer/
 [7]: /technical-guide/getting-started/#install-with-kubernetes
 [8]: /technical-guide/troubleshooting/
+[9]: /technical-guide/getting-started/proxmox-vm/

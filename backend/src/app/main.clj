@@ -593,6 +593,8 @@
 
    :app.nitrate/client
    {::http.client/client (ig/ref ::http.client/client)
+    ::db/pool            (ig/ref ::db/pool)
+    ::setup/props        (ig/ref ::setup/props)
     ;; No ::jobs/defs: nitrate never submits jobs, and consumer-task's
     ;; job-def needs this client — that would cycle through jobs/defs.
     ::setup/shared-keys  (ig/ref ::setup/shared-keys)}

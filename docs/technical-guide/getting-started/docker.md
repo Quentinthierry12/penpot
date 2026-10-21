@@ -122,88 +122,35 @@ This will fetch the latest images. When you do <code class="language-bash">docke
     It is strongly recommended to update the Penpot version in small increments, rather than updating between two distant versions.
 </p>
 
-#### Upgrade to 2.18
+#### Enterprise features in this fork
 
-This version deploys a new service, **`penpot-admin-console`**, in the official `docker-compose.yaml`
-example. If you maintain your own compose file, you need to replicate the following changes manually:
+Organization storage and the administration console are built into this fork. For a custom
+Compose deployment, enable `enable-admin-console` in `PENPOT_FLAGS` for both the frontend and
+backend. Do not add the upstream `penpot-admin-console` container or set
+`PENPOT_ADMIN_CONSOLE_URI`; leaving that variable unset selects the local implementation.
 
-**1. Add the `enable-admin-console` flag**
+The included `docker-compose.yaml` already enables the feature. Organization records are
+stored in the Penpot database and are created by the migration that runs at backend startup.
+Open the console from the organization menu in the team switcher. The local console includes
+OIDC SSO, organization policy, membership controls, team links, and recent audit events.
 
-**NOTE:** Enabling the Admin Console is not required in this version, but it will be in a future release.
-We recommend setting it up now to avoid a more complex upgrade later.
+To configure organization SSO, first give Penpot a stable public HTTPS URL through
+`PENPOT_PUBLIC_URI` and your reverse proxy. Register the exact callback URL shown in the
+organization console with your identity provider: `<PENPOT_PUBLIC_URI>api/auth/oidc/callback`.
+Create a confidential OIDC client using the authorization-code flow and the `openid`,
+`profile`, and `email` scopes. Enter the issuer identifier (not the `.well-known` discovery
+URL), client ID, and client secret in the console, then enable SSO. Penpot checks discovery
+and client credentials before saving an active configuration.
 
-This step (the `enable-admin-console` flag) only applies to this version 2.18. In a future release, the
-Admin Console will be enabled by default and this flag will be removed. If you're upgrading directly to a
-version where the flag has already been removed, skip step 1 and go straight to steps 2–4, which remain
-required.
+Users must already have Penpot accounts and organization access. For the SSO check to pass,
+the identity provider must return the same email address as the Penpot account and mark that
+email verified. This version does not create accounts automatically or synchronize IdP groups;
+it supports OIDC and does not support SAML. Keep the Penpot secret key stable: it encrypts
+organization client secrets stored in the database.
 
-Wherever you set `PENPOT_FLAGS` (frontend and backend):
-
-```diff
-- PENPOT_FLAGS: disable-email-verification enable-smtp enable-prepl-server disable-secure-session-cookies enable-mcp
-+ PENPOT_FLAGS: disable-email-verification enable-smtp enable-prepl-server disable-secure-session-cookies enable-mcp enable-admin-console
-```
-
-**2. Add the new `penpot-admin-console` service**
-
-```yaml
-  penpot-admin-console:
-    image: "penpotapp/admin-console:2.18"
-    restart: always
-
-    depends_on:
-      penpot-postgres:
-        condition: service_healthy
-
-    networks:
-      - penpot
-
-    environment:
-      PENPOT_PUBLIC_URI: http://localhost:9001
-      PENPOT_SECRET_KEY: change-this-insecure-key
-      PENPOT_DATABASE_URI: postgresql://penpot-postgres/penpot
-      PENPOT_DATABASE_USERNAME: penpot
-      PENPOT_DATABASE_PASSWORD: penpot
-
-      # Don't touch it; this uses an internal docker network to
-      # communicate with the frontend.
-      PENPOT_INTERNAL_URI: http://penpot-frontend:8080
-```
-> Use the same `PENPOT_PUBLIC_URI`, `PENPOT_SECRET_KEY`, and database credentials you already have configured for `penpot-backend`.
-
-**3. Update `penpot-frontend`**
-
-- Add `penpot-admin-console` to `depends_on`.
-- Add the following environment variable:
-
-```diff
-    environment:
-      PENPOT_FLAGS: disable-email-verification enable-smtp enable-prepl-server disable-secure-session-cookies enable-mcp enable-admin-console
-      PENPOT_HTTP_SERVER_MAX_BODY_SIZE: 367001600
-      PENPOT_HTTP_SERVER_MAX_MULTIPART_BODY_SIZE: 367001600
-      PENPOT_PUBLIC_URI: http://localhost:9001
-+
-+     # Don't touch it; this uses an internal docker network to
-+     # communicate with the admin-console.
-+     PENPOT_ADMIN_CONSOLE_URI: http://penpot-admin-console:3000
-```
-
-**4. Update `penpot-backend`**
-
-Add the same variable:
-
-```diff
-    environment:
-      PENPOT_FLAGS: disable-email-verification enable-smtp enable-prepl-server disable-secure-session-cookies enable-mcp enable-admin-console
-      PENPOT_PUBLIC_URI: http://localhost:9001
-      PENPOT_HTTP_SERVER_MAX_BODY_SIZE: 367001600
-      PENPOT_HTTP_SERVER_MAX_MULTIPART_BODY_SIZE: 367001600
-      PENPOT_SECRET_KEY: change-this-insecure-key
-+
-+     # Don't touch it; this uses an internal docker network to
-+     # communicate with the admin-console.
-+     PENPOT_ADMIN_CONSOLE_URI: http://penpot-admin-console:3000
-```
+Before production use, replace the example `PENPOT_SECRET_KEY` in Compose with a randomly
+generated value (the Compose comments include a generator command). Keep it private and back
+it up securely: changing or losing it prevents Penpot from decrypting saved OIDC client secrets.
 
 #### Upgrade from version 1.x to 2.0
 

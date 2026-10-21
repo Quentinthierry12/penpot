@@ -48,7 +48,7 @@ x-body-size: &penpot-http-body-size
 x-secret-key: &penpot-secret-key
   PENPOT_SECRET_KEY: change-this-insecure-key
 
-## Single database configuration block, shared by backend and admin-console.
+## Database configuration for Penpot.
 ## Don't touch them unless you are using custom postgresql connection parameters.
 x-database: &penpot-database
   PENPOT_DATABASE_URI: postgresql://penpot-postgres/penpot
@@ -99,7 +99,6 @@ services:
 
     depends_on:
       - penpot-backend
-      - penpot-admin-console
       - penpot-mcp
       - penpot-exporter
 
@@ -121,10 +120,6 @@ services:
 
     environment:
       << : [*penpot-flags, *penpot-http-body-size, *penpot-public-uri]
-
-      # Don't touch it; this uses an internal docker network to
-      # communicate with the admin-console.
-      PENPOT_ADMIN_CONSOLE_URI: http://penpot-admin-console:3000
 
       # Set to "true" on hosts where IPv6 is disabled at kernel boot level.
       # PENPOT_DISABLE_IPV6_LISTEN: "true"
@@ -150,10 +145,6 @@ services:
 
     environment:
       << : [*penpot-flags, *penpot-public-uri, *penpot-http-body-size, *penpot-secret-key, *penpot-database]
-
-      # Don't touch it; this uses an internal docker network to
-      # communicate with the admin-console.
-      PENPOT_ADMIN_CONSOLE_URI: http://penpot-admin-console:3000
 
       ## Valkey (or previously redis) is used for the websockets notifications. Don't touch
       ## unless the valkey container has different parameters or different name.
@@ -190,24 +181,6 @@ services:
       PENPOT_SMTP_PASSWORD:
       PENPOT_SMTP_TLS: "false"
       PENPOT_SMTP_SSL: "false"
-
-  penpot-admin-console:
-    image: "penpotapp/admin-console:${PENPOT_VERSION:-2.18}"
-    restart: always
-
-    depends_on:
-      penpot-postgres:
-        condition: service_healthy
-
-    networks:
-      - penpot
-
-    environment:
-      << : [*penpot-public-uri, *penpot-secret-key, *penpot-database]
-
-      # Don't touch it; this uses an internal docker network to
-      # communicate with the frontend.
-      PENPOT_INTERNAL_URI: http://penpot-frontend:8080
 
   penpot-mcp:
     image: "penpotapp/mcp:${PENPOT_VERSION:-2.18}"

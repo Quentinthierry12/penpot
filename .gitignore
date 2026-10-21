@@ -106,6 +106,7 @@ opencode.json
 /**/node_modules
 /**/.yarn/*
 /.pnpm-store
+/.npm-cache/
 /.vscode
 /.idea
 *.iml

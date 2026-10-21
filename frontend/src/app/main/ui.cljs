@@ -21,6 +21,7 @@
    [app.main.ui.exports.files]
    [app.main.ui.frame-preview :as frame-preview]
    [app.main.ui.nitrate.entry :as nitrate-entry]
+   [app.main.ui.nitrate.admin-console :as admin-console]
    [app.main.ui.notifications :as notifications]
    [app.main.ui.onboarding.questions :refer [questions-modal]]
    [app.main.ui.onboarding.team-choice :refer [onboarding-team-modal*]]
@@ -120,6 +121,9 @@
 
        :nitrate-entry
        [:> nitrate-entry/nitrate-entry-page* {:profile profile}]
+
+       :enterprise-admin
+       [:> admin-console/admin-console-page* {:route route}]
 
        (:settings-profile
         :settings-password

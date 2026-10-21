@@ -15,8 +15,11 @@
    [app.common.schema :as sm]
    [app.common.schema.generators :as sg]
    [app.common.time :as ct]
+   [app.common.transit :as t]
+   [app.common.uuid :as uuid]
    [app.common.types.organization :as cto
     :refer [schema:nitrate-sso]]
+   [app.db :as db]
    [app.config :as cf]
    [app.http.client :as http]
    [app.http.session :as session]
@@ -25,11 +28,31 @@
    [app.util.cache :as cache]
    [clojure.core :as c]
    [clojure.string :as str]
+   [buddy.sign.jwe :as jwe]
    [integrant.core :as ig]))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; HELPERS
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(defn- decode-organization
+  [organization]
+  (update organization :permissions db/decode-json-pgobject))
+
+(defn- encrypt-organization-secret
+  [cfg secret]
+  (when secret
+    (jwe/encrypt (t/encode secret)
+                 (get-in cfg [::setup/props :tokens-key])
+                 {:alg :a256kw :enc :a256gcm})))
+
+(defn- decrypt-organization-secret
+  [cfg secret]
+  (when secret
+    (t/decode
+     (jwe/decrypt secret
+                  (get-in cfg [::setup/props :tokens-key])
+                  {:alg :a256kw :enc :a256gcm}))))
 
 (defn- generate-nitrate-uri
   "Joins relative path segments to the Nitrate backend URI.
@@ -135,6 +158,238 @@
                            (with-validate uri schema :throw-on-error? throw-on-error?))]
     (full-http-call)))
 
+(defn- local-get-team-organization
+  [cfg {:keys [team-id profile-id]}]
+  (when-let [{:keys [organization-id]}
+             (db/get cfg :organization-team-rel {:team-id team-id})]
+    (when-let [organization (db/get cfg :organization {:id organization-id})]
+      (let [membership (db/get cfg :organization-member-rel
+                               {:organization-id organization-id
+                                :profile-id profile-id})]
+        {:id team-id
+         :is-your-penpot (= team-id (:default-team-id membership))
+         :organization (select-keys (decode-organization organization)
+                                     [:id :name :slug :owner-id :logo-id
+                                      :avatar-bg-url :permissions])}))))
+
+(defn- local-get-teams-organizations
+  [cfg {:keys [team-ids profile-id]}]
+  (->> team-ids
+       (keep (fn [team-id]
+               (local-get-team-organization cfg {:team-id team-id
+                                                 :profile-id profile-id})))
+       vec))
+
+(defn- local-get-organization-membership
+  [cfg {:keys [organization-id profile-id]}]
+  (when-let [organization (db/get cfg :organization {:id organization-id})]
+    (let [membership (db/get cfg :organization-member-rel
+                             {:organization-id organization-id
+                              :profile-id profile-id})]
+      {:organization-id organization-id
+       :is-member (some? membership)
+       :default-team-id (:default-team-id membership)})))
+
+(defn- local-get-organization-membership-by-team
+  [cfg {:keys [team-id profile-id]}]
+  (when-let [{:keys [organization-id]}
+             (db/get cfg :organization-team-rel {:team-id team-id})]
+    (local-get-organization-membership cfg {:organization-id organization-id
+                                            :profile-id profile-id})))
+
+(defn- local-get-organization-summary
+  [cfg {:keys [organization-id profile-id]}]
+  (when-let [organization (db/get cfg :organization {:id organization-id})]
+    (let [default-team-id (some-> (db/get cfg :organization-member-rel
+                                          {:organization-id organization-id
+                                           :profile-id profile-id})
+                                  :default-team-id)
+          teams (->> (db/query cfg :organization-team-rel {:organization-id organization-id})
+                     (mapv (fn [{:keys [team-id]}]
+                             {:id team-id
+                              :is-your-penpot (= team-id default-team-id)})))]
+      (-> (select-keys (decode-organization organization) [:id :name :slug :owner-id :logo-id :avatar-bg-url
+                                    :permissions])
+          (assoc :sso-active (boolean (:is-active (db/get cfg :organization-sso
+                                                          {:organization-id organization-id})))
+                 :teams teams)))))
+
+(defn- local-get-owned-organizations
+  [cfg {:keys [profile-id]}]
+  (->> (db/query cfg :organization {:owner-id profile-id})
+       (mapv (fn [{:keys [id]}]
+               (local-get-organization-summary cfg {:organization-id id
+                                                    :profile-id profile-id})))))
+
+(defn- local-get-owned-organizations-summary
+  [cfg {:keys [profile-id]}]
+  (->> (local-get-owned-organizations cfg {:profile-id profile-id})
+       (mapv (fn [{:keys [id name slug logo-id avatar-bg-url]}]
+               {:id id
+                :name name
+                :slug slug
+                :logo-id logo-id
+                :avatar-bg-url avatar-bg-url
+                :team-count (count (db/query cfg :organization-team-rel
+                                             {:organization-id id}))
+                :member-count (count (db/query cfg :organization-member-rel
+                                               {:organization-id id}))}))))
+
+(defn- local-get-organization-members
+  [cfg {:keys [organization-id]}]
+  (mapv :profile-id
+        (db/query cfg :organization-member-rel {:organization-id organization-id})))
+
+(defn- local-add-profile-to-organization
+  [cfg {:keys [profile-id organization-id team-id]}]
+  (db/insert! cfg :organization-member-rel
+              {:organization-id organization-id
+               :profile-id profile-id
+               :default-team-id team-id}
+              ::db/on-conflict-do-nothing? true)
+  (local-get-organization-membership cfg {:organization-id organization-id
+                                          :profile-id profile-id}))
+
+(defn- local-remove-profile-from-organization
+  [cfg {:keys [profile-id organization-id]}]
+  (db/delete! cfg :organization-member-rel {:organization-id organization-id
+                                            :profile-id profile-id})
+  nil)
+
+(defn- local-remove-team-from-organization
+  [cfg {:keys [team-id]}]
+  (db/delete! cfg :organization-team-rel {:team-id team-id})
+  (db/update! cfg :organization-member-rel
+              {:default-team-id nil}
+              {:default-team-id team-id})
+  nil)
+
+(defn- local-delete-team
+  [cfg {:keys [team-id]}]
+  (local-remove-team-from-organization cfg {:team-id team-id}))
+
+(defn- local-cleanup-deleted-profile
+  [cfg {:keys [profile-id]}]
+  (db/delete! cfg :organization-member-rel {:profile-id profile-id})
+  (db/delete! cfg :organization {:owner-id profile-id})
+  nil)
+
+(defn- local-get-subscription
+  [_cfg _params]
+  nil)
+
+(defn- local-get-subscription-warning
+  [_cfg _params]
+  nil)
+
+(defn- local-connectivity
+  [_cfg _params]
+  {:licenses false})
+
+(defn- local-no-identity
+  [_cfg _params]
+  nil)
+
+(defn- local-ingest-audit-log
+  [cfg {:keys [events]}]
+  (doseq [{:keys [id name profile-id created-at props] :as event} events]
+    (when-let [organization-id (some-> (or (:organization-id event)
+                                           (:organization-id props))
+                                       uuid/coerce)]
+      (when (db/get cfg :organization {:id organization-id})
+        (db/insert! cfg :organization-audit-log
+                    {:id (or (some-> id uuid/coerce) (uuid/next))
+                     :organization-id organization-id
+                     :event-name name
+                     :profile-id (some-> profile-id uuid/coerce)
+                     :occurred-at (or created-at (ct/now))
+                     :event (db/json event)}
+                    ::db/on-conflict-do-nothing? true))))
+  nil)
+
+(defn- local-get-organization-permissions
+  [cfg {:keys [organization-id]}]
+  (when-let [organization (db/get cfg :organization {:id organization-id})]
+    {:organization-id organization-id
+     :owner-id (:owner-id organization)
+     :permissions (db/decode-json-pgobject (:permissions organization))}))
+
+(defn- local-get-organization-sso
+  [cfg {:keys [organization-id]}]
+  (when-let [sso (db/get cfg :organization-sso {:organization-id organization-id})]
+    {:organization-id organization-id
+     :active (:is-active sso)
+     :provider (:provider sso)
+     :client-id (:client-id sso)
+     :client-secret (decrypt-organization-secret cfg (:client-secret sso))
+     :issuer (:issuer sso)}))
+
+(defn- local-set-organization-sso
+  [cfg {:keys [organization-id active provider client-id client-secret issuer]}]
+  (let [values {:is-active active
+                :provider (or provider "oidc")
+                :client-id client-id
+                :client-secret (encrypt-organization-secret cfg client-secret)
+                :issuer issuer}]
+    (if (db/get cfg :organization-sso {:organization-id organization-id})
+      (db/update! cfg :organization-sso values {:organization-id organization-id})
+      (db/insert! cfg :organization-sso (assoc values :organization-id organization-id)))
+    (local-get-organization-sso cfg {:organization-id organization-id})))
+
+(defn- local-get-organization-sso-by-team
+  [cfg {:keys [team-id]}]
+  (when-let [{:keys [organization-id]}
+             (db/get cfg :organization-team-rel {:team-id team-id})]
+    (local-get-organization-sso cfg {:organization-id organization-id})))
+
+(defn- local-set-team-organization
+  [cfg {:keys [organization-id team-id is-default profile-id]}]
+  (db/update! cfg :organization-member-rel
+              {:default-team-id nil}
+              {:default-team-id team-id})
+  (db/delete! cfg :organization-team-rel {:team-id team-id})
+  (db/insert! cfg :organization-team-rel
+              {:organization-id organization-id
+               :team-id team-id})
+  (when is-default
+    (db/update! cfg :organization-member-rel
+                {:default-team-id team-id}
+                {:organization-id organization-id
+                 :profile-id profile-id}))
+  (local-get-team-organization cfg {:team-id team-id
+                                    :profile-id profile-id}))
+
+(defn- with-local-config
+  [system-cfg local-method]
+  (fn [request-cfg params]
+    (local-method (merge system-cfg request-cfg) params)))
+
+(defn- local-client
+  [cfg]
+  {:get-team-organization               (with-local-config cfg local-get-team-organization)
+   :get-teams-organizations             (with-local-config cfg local-get-teams-organizations)
+   :get-organization-membership         (with-local-config cfg local-get-organization-membership)
+   :get-organization-membership-by-team (with-local-config cfg local-get-organization-membership-by-team)
+   :get-organization-summary            (with-local-config cfg local-get-organization-summary)
+   :get-owned-organizations              (with-local-config cfg local-get-owned-organizations)
+   :get-owned-organizations-summary     (with-local-config cfg local-get-owned-organizations-summary)
+   :get-organization-members            (with-local-config cfg local-get-organization-members)
+   :add-profile-to-organization         (with-local-config cfg local-add-profile-to-organization)
+   :remove-profile-from-organization    (with-local-config cfg local-remove-profile-from-organization)
+   :remove-team-from-organization       (with-local-config cfg local-remove-team-from-organization)
+   :delete-team                         (with-local-config cfg local-delete-team)
+   :cleanup-deleted-penpot-user         (with-local-config cfg local-cleanup-deleted-profile)
+   :get-organization-permissions        (with-local-config cfg local-get-organization-permissions)
+   :get-organization-sso                (with-local-config cfg local-get-organization-sso)
+   :set-organization-sso                (with-local-config cfg local-set-organization-sso)
+   :get-organization-sso-by-team        (with-local-config cfg local-get-organization-sso-by-team)
+   :get-subscription                    (with-local-config cfg local-get-subscription)
+   :get-subscription-warning            (with-local-config cfg local-get-subscription-warning)
+   :connectivity                        (with-local-config cfg local-connectivity)
+   :get-identity                        (with-local-config cfg local-no-identity)
+   :ingest-audit-log                    (with-local-config cfg local-ingest-audit-log)
+   :set-team-organization               (with-local-config cfg local-set-team-organization)})
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; API
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -144,11 +399,13 @@
   (when (contains? cf/flags :admin-console)
     (let [uri (cf/get :admin-console-uri)]
       (if (nil? uri)
-        (ex/raise :type :nitrate-not-configured
-                  :hint "admin console is not configured; refer to the documentation to complete the setup")
+        (if-let [method-fn (get (get cfg ::client) method)]
+          (method-fn cfg params)
+          (ex/raise :type :nitrate-not-configured
+                    :hint (str "local admin console does not implement " (name method))))
         (let [client (get cfg ::client)
-              method (get client method)]
-          (method params))))))
+              method-fn (get client method)]
+          (method-fn params))))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
@@ -512,9 +769,9 @@
 (defmethod ig/init-key ::client
   [_ cfg]
   (when (contains? cf/flags :admin-console)
-    (when (nil? (cf/get :admin-console-uri))
-      (l/warn :hint "admin console is not configured; nitrate calls will fail until the setup is complete"))
-    {:get-team-organization               (partial get-team-organization-api cfg)
+    (if (nil? (cf/get :admin-console-uri))
+      (local-client cfg)
+      {:get-team-organization               (partial get-team-organization-api cfg)
      :get-teams-organizations             (partial get-teams-organizations-api cfg)
      :set-team-organization               (partial set-team-organization-api cfg)
      :get-organization-membership         (partial get-organization-membership-api cfg)
@@ -536,7 +793,7 @@
      :connectivity                        (partial get-connectivity-api cfg)
      :get-identity                        (partial get-identity-api cfg)
      :redeem-activation-code              (partial redeem-activation-code-api cfg)
-     :ingest-audit-log                    (partial ingest-audit-log-api cfg)}))
+       :ingest-audit-log                    (partial ingest-audit-log-api cfg)})))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; UTILS

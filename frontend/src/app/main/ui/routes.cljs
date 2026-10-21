@@ -65,7 +65,7 @@
           :workspace}
         (concat
          (when (contains? cf/flags :admin-console)
-           [:nitrate-entry])
+           [:nitrate-entry :enterprise-admin])
          (when *assert*
            [:debug-icons-preview
             :debug-playground]))))

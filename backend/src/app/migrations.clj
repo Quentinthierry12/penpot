@@ -532,7 +532,13 @@
     :fn (mg/resource "app/migrations/sql/0156-reset-pg-storage-defaults.sql")}
 
    {:name "0157-add-audit-log-pending-table"
-    :fn (mg/resource "app/migrations/sql/0157-add-audit-log-pending-table.sql")}])
+    :fn (mg/resource "app/migrations/sql/0157-add-audit-log-pending-table.sql")}
+
+   {:name "0158-add-local-organization-tables"
+    :fn (mg/resource "app/migrations/sql/0158-add-local-organization-tables.sql")}
+
+   {:name "0159-add-local-organization-audit-log"
+    :fn (mg/resource "app/migrations/sql/0159-add-local-organization-audit-log.sql")}])
 
 (defn apply-migrations!
   [pool name migrations]

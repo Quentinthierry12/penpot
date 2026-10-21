@@ -22,11 +22,12 @@ Docker images are published shortly after the SaaS update:
 These are the main options to configure your Penpot instance:
 
 1. Deploy with [docker compose][2]
-2. Use Kubernetes in its different flavors:
+2. Deploy this fork on a [Proxmox VM][8] with Docker Compose, or review the advanced native-installation limits
+3. Use Kubernetes in its different flavors:
     - Deploy the [official Helm Chart][3]
     - Deploy in [Openshift][4]
     - Deploy in [Rancher][5]
-3. Other official options:
+4. Other official options:
     - [Elestio][6]
     - [Truenas][7]
 
@@ -39,3 +40,4 @@ Or you can try [other options][1], offered by Penpot community.
 [5]: /technical-guide/getting-started/kubernetes/#using-rancher%3F
 [6]: /technical-guide/getting-started/elestio/
 [7]: https://apps.truenas.com/catalog/penpot/
+[8]: /technical-guide/getting-started/proxmox-vm/

@@ -17,16 +17,22 @@
    [app.common.types.organization :as cto]
    [app.config :as cf]
    [app.db :as db]
+   [app.http.session :as session]
+   [app.loggers.audit :as-alias audit]
+   [app.msgbus :as-alias mbus]
    [app.nitrate :as nitrate]
-   [app.rpc :as-alias rpc]
+   [app.rpc :as rpc]
    [app.rpc.commands.teams :as teams]
+   [app.rpc.permissions :as perms]
    [app.rpc.doc :as-alias doc]
    [app.rpc.helpers :as rph]
    [app.rpc.nitrate.emails-helper :as neh]
    [app.rpc.nitrate.organization-helper :as noh]
    [app.rpc.notifications :as notifications]
    [app.util.services :as sv]
-   [buddy.core.codecs :as bc]))
+   [app.common.uuid :as uuid]
+   [buddy.core.codecs :as bc]
+   [clojure.string :as str]))
 
 
 (defn assert-is-owner [cfg profile-id team-id]
@@ -53,6 +59,374 @@
    ::sm/result schema:connectivity}
   [cfg _params]
   (nitrate/call cfg :connectivity {}))
+
+(def ^:private schema:owned-organization
+  [:map
+   [:id ::sm/uuid]
+   [:name ::sm/text]
+   [:slug ::sm/text]
+   [:owner-id ::sm/uuid]
+   [:team-count ::sm/int]
+   [:member-count ::sm/int]])
+
+(sv/defmethod ::get-owned-organizations
+  "List organizations owned by the current profile."
+  {::rpc/auth true
+   ::doc/added "2.19"
+   ::sm/params [:map]
+   ::sm/result [:vector schema:owned-organization]}
+  [{:keys [::db/pool]} {:keys [::rpc/profile-id]}]
+  (db/exec! pool
+            ["SELECT o.id,
+                     o.name,
+                     o.slug,
+                     o.owner_id,
+                     (SELECT count(*)
+                        FROM organization_team_rel AS otr
+                       WHERE otr.organization_id = o.id) AS team_count,
+                     (SELECT count(*)
+                        FROM organization_member_rel AS omr
+                       WHERE omr.organization_id = o.id) AS member_count
+                FROM organization AS o
+               WHERE o.owner_id = ?
+            ORDER BY o.created_at, o.id"
+             profile-id]))
+
+(def ^:private schema:create-organization-params
+  [:map {:title "CreateOrganizationParams" :closed true}
+   [:name [:and ::sm/text [:fn #(<= 1 (count %) 120)]]]])
+
+(def ^:private schema:create-organization-result
+  [:map {:title "CreateOrganizationResult"}
+   [:id ::sm/uuid]
+   [:name ::sm/text]
+   [:slug ::sm/text]
+   [:default-team-id ::sm/uuid]])
+
+(defn- organization-slug
+  [name organization-id]
+  (let [base (-> name
+                 str/lower-case
+                 (str/replace #"[^a-z0-9]+" "-")
+                 (str/replace #"^-|-$" ""))
+        suffix (subs (str organization-id) 0 8)]
+    (str (if (str/blank? base) "organization" base) "-" suffix)))
+
+(defn- assert-organization-owner!
+  [cfg profile-id organization-id]
+  (let [organization (db/get cfg :organization {:id organization-id})]
+    (when-not (= profile-id (:owner-id organization))
+      (ex/raise :type :validation
+                :code :insufficient-permissions))
+    organization))
+
+(sv/defmethod ::create-organization
+  "Create an organization and its owner's personal projects team."
+  {::rpc/auth true
+   ::doc/added "2.19"
+   ::sm/params schema:create-organization-params
+   ::sm/result schema:create-organization-result
+   ::db/transaction true}
+  [cfg {:keys [::rpc/profile-id name]}]
+  (let [organization-id (uuid/next)
+        slug            (organization-slug name organization-id)
+        default-team    (teams/create-team cfg {:profile-id profile-id
+                                                 :name "Personal Projects"
+                                                 :is-default true})
+        default-team-id (:id default-team)]
+    (db/insert! cfg :organization
+                {:id organization-id
+                 :owner-id profile-id
+                 :name name
+                 :slug slug})
+    (db/insert! cfg :organization-member-rel
+                {:organization-id organization-id
+                 :profile-id profile-id
+                 :default-team-id default-team-id})
+    (db/insert! cfg :organization-team-rel
+                {:organization-id organization-id
+                 :team-id default-team-id})
+    (rph/with-meta
+      (rph/wrap {:id organization-id
+                 :name name
+                 :slug slug
+                 :default-team-id default-team-id})
+      {::audit/name "create-organization"
+       ::audit/props {:organization-id organization-id
+                      :name name}})))
+
+(sv/defmethod ::rename-organization
+  "Rename an organization owned by the current profile."
+  {::rpc/auth true
+   ::sm/params [:map
+                [:organization-id ::sm/uuid]
+                [:name [:and ::sm/text [:fn #(<= 1 (count %) 120)]]]]
+   ::sm/result [:map [:slug ::sm/text]]}
+  [cfg {:keys [::rpc/profile-id organization-id name]}]
+  (assert-organization-owner! cfg profile-id organization-id)
+  (let [slug (organization-slug name organization-id)]
+    (db/update! cfg :organization {:name name :slug slug} {:id organization-id})
+    (rph/with-meta (rph/wrap {:slug slug})
+      {::audit/name "rename-organization"
+       ::audit/props {:organization-id organization-id
+                      :name name}})))
+
+(sv/defmethod ::delete-organization
+  "Delete an empty organization owned by the current profile."
+  {::rpc/auth true
+   ::db/transaction true
+   ::sm/params [:map [:organization-id ::sm/uuid]]
+   ::sm/result :nil}
+  [cfg {:keys [::db/conn ::rpc/profile-id organization-id]}]
+  (let [organization (assert-organization-owner! cfg profile-id organization-id)
+        teams (db/query conn :organization-team-rel {:organization-id organization-id})]
+    (when (seq teams)
+      (ex/raise :type :validation
+                :code :organization-must-be-empty
+                :hint "Move or delete the organization's teams before deleting it"))
+    (db/delete! conn :organization {:id organization-id})
+    (rph/with-meta (rph/wrap)
+      {::audit/name "delete-organization"
+       ::audit/props {:organization-id organization-id
+                      :name (:name organization)}})))
+
+(sv/defmethod ::create-organization-team
+  "Create a team under an organization owned by the current profile."
+  {::rpc/auth true
+   ::db/transaction true
+   ::sm/params [:map
+                [:organization-id ::sm/uuid]
+                [:name [:and ::sm/text [:fn #(<= 1 (count %) 120)]]]]
+   ::sm/result [:map
+                [:id ::sm/uuid]
+                [:name ::sm/text]]}
+  [cfg {:keys [::rpc/profile-id organization-id name]}]
+  (assert-organization-owner! cfg profile-id organization-id)
+  (let [team (teams/create-team cfg {:profile-id profile-id
+                                     :name name
+                                     :organization-id organization-id})]
+    (rph/with-meta (rph/wrap (select-keys team [:id :name]))
+      {::audit/name "create-team"
+       ::audit/props {:organization-id organization-id
+                      :team-id (:id team)
+                      :team-name (:name team)}})))
+
+(def ^:private schema:organization-sso-settings
+  [:map
+   [:organization-id ::sm/uuid]
+   [:active ::sm/boolean]
+   [:provider {:optional true} [:enum "oidc"]]
+   [:client-id {:optional true} ::sm/text]
+   [:client-secret {:optional true} ::sm/text]
+   [:issuer {:optional true} ::sm/text]])
+
+(sv/defmethod ::get-organization-sso-settings
+  "Get the OIDC settings for an organization owned by the current profile."
+  {::rpc/auth true
+   ::sm/params [:map [:organization-id ::sm/uuid]]
+   ::sm/result [:maybe [:map
+                        [:active ::sm/boolean]
+                        [:provider [:enum "oidc"]]
+                        [:client-id ::sm/text]
+                        [:issuer [:maybe ::sm/text]]]]}
+  [cfg {:keys [::rpc/profile-id organization-id]}]
+  (assert-organization-owner! cfg profile-id organization-id)
+  (when-let [sso (nitrate/call cfg :get-organization-sso {:organization-id organization-id})]
+    (select-keys sso [:active :provider :client-id :issuer])))
+
+(sv/defmethod ::set-organization-sso-settings
+  "Save OIDC settings for an organization owned by the current profile."
+  {::rpc/auth true
+   ::sm/params schema:organization-sso-settings
+   ::sm/result [:map [:active ::sm/boolean]]}
+  [cfg {:keys [::rpc/profile-id organization-id active provider client-id client-secret issuer]}]
+  (assert-organization-owner! cfg profile-id organization-id)
+  (let [current (nitrate/call cfg :get-organization-sso {:organization-id organization-id})
+        config  {:organization-id organization-id
+                 :active active
+                 :provider (or provider "oidc")
+                 :client-id (or client-id (:client-id current))
+                 :client-secret (or client-secret (:client-secret current))
+                 :issuer (or issuer (:issuer current))}]
+    (when active
+      (when (or (str/blank? (:client-id config))
+                (str/blank? (:client-secret config))
+                (str/blank? (:issuer config)))
+        (ex/raise :type :validation
+                  :code :invalid-sso-config
+                  :hint "Issuer, client ID and client secret are required to enable OIDC SSO"))
+      (when-not (oidc/is-organization-sso-config-valid? cfg config)
+        (ex/raise :type :validation
+                  :code :invalid-sso-config
+                  :hint "The OIDC discovery document or client credentials could not be validated")))
+    (when (or active current)
+      (nitrate/call cfg :set-organization-sso config))
+    (rpc/invalidate-organization-sso-cache-by-organization! organization-id)
+    (session/clear-organization-sso-sessions! (::db/pool cfg) organization-id)
+    (rph/with-meta (rph/wrap {:active active})
+      {::audit/name "success-apply-organization-sso-changes"
+       ::audit/props {:organization-id organization-id
+                      :sso-active active
+                      :issuer issuer}})))
+
+(def ^:private default-organization-permissions
+  {:create-teams "any"
+   :delete-teams "onlyOwners"
+   :move-teams "always"
+   :send-invitations "ownersAndAdmins"
+   :new-team-members "anyone"})
+
+(def ^:private schema:organization-permissions
+  [:map {:closed true}
+   [:create-teams [:enum "any" "onlyMe"]]
+   [:delete-teams [:enum "onlyOwners" "never"]]
+   [:move-teams [:enum "always" "myOrganizations" "never"]]
+   [:send-invitations [:enum "ownersAndAdmins" "owners"]]
+   [:new-team-members [:enum "anyone" "members"]]])
+
+(sv/defmethod ::get-organization-permissions-settings
+  "Get the organization permission policy for its owner."
+  {::rpc/auth true
+   ::sm/params [:map [:organization-id ::sm/uuid]]
+   ::sm/result schema:organization-permissions}
+  [cfg {:keys [::rpc/profile-id organization-id]}]
+  (let [organization (assert-organization-owner! cfg profile-id organization-id)]
+    (merge default-organization-permissions
+           (db/decode-json-pgobject (:permissions organization)))))
+
+(sv/defmethod ::set-organization-permissions-settings
+  "Update team and invitation policy for an organization owner."
+  {::rpc/auth true
+   ::sm/params [:map
+                [:organization-id ::sm/uuid]
+                [:permissions schema:organization-permissions]]
+   ::sm/result schema:organization-permissions}
+  [cfg {:keys [::rpc/profile-id organization-id permissions]}]
+  (assert-organization-owner! cfg profile-id organization-id)
+  (let [permissions (merge default-organization-permissions permissions)]
+    (db/update! cfg :organization {:permissions (db/json permissions)} {:id organization-id})
+    (rph/with-meta (rph/wrap permissions)
+      {::audit/name "update-organization-permissions"
+       ::audit/props {:organization-id organization-id
+                      :permissions permissions}})))
+
+(def ^:private schema:organization-audit-event
+  [:map
+   [:id ::sm/uuid]
+   [:event-name ::sm/text]
+   [:profile-id [:maybe ::sm/uuid]]
+   [:occurred-at ct/schema:inst]
+   [:event ::sm/any]])
+
+(sv/defmethod ::get-organization-audit-log
+  "Return recent audit events for an organization owned by the current profile."
+  {::rpc/auth true
+   ::sm/params [:map [:organization-id ::sm/uuid]]
+   ::sm/result [:vector schema:organization-audit-event]}
+  [cfg {:keys [::rpc/profile-id organization-id]}]
+  (assert-organization-owner! cfg profile-id organization-id)
+  (mapv #(update % :event db/decode-json-pgobject)
+        (db/exec! cfg
+                  ["SELECT id, event_name, profile_id, occurred_at, event
+                     FROM organization_audit_log
+                    WHERE organization_id = ?
+                 ORDER BY occurred_at DESC, id DESC
+                    LIMIT 100"
+                   organization-id])))
+
+(def ^:private schema:organization-admin-summary
+  [:map
+   [:teams [:vector [:map
+                     [:id ::sm/uuid]
+                     [:name ::sm/text]
+                     [:member-count ::sm/int]]]]
+   [:members [:vector [:map
+                       [:id ::sm/uuid]
+                       [:name [:maybe ::sm/text]]
+                       [:email ::sm/email]
+                       [:created-at ct/schema:inst]]]]])
+
+(sv/defmethod ::get-organization-admin-summary
+  "List teams and organization members for the owner console."
+  {::rpc/auth true
+   ::sm/params [:map [:organization-id ::sm/uuid]]
+   ::sm/result schema:organization-admin-summary}
+  [{:keys [::db/pool] :as cfg} {:keys [::rpc/profile-id organization-id]}]
+  (assert-organization-owner! cfg profile-id organization-id)
+  {:teams (db/exec! pool
+                    ["SELECT t.id,
+                             t.name,
+                             (SELECT count(*)
+                                FROM team_profile_rel AS tpr
+                               WHERE tpr.team_id = t.id) AS member_count
+                        FROM organization_team_rel AS otr
+                        JOIN team AS t ON (t.id = otr.team_id)
+                       WHERE otr.organization_id = ?
+                         AND t.deleted_at IS NULL
+                    ORDER BY t.name, t.id"
+                     organization-id])
+   :members (db/exec! pool
+                      ["SELECT p.id,
+                               p.fullname AS name,
+                               p.email,
+                               omr.created_at
+                          FROM organization_member_rel AS omr
+                          JOIN profile AS p ON (p.id = omr.profile_id)
+                         WHERE omr.organization_id = ?
+                           AND p.deleted_at IS NULL
+                      ORDER BY lower(p.fullname), p.email"
+                       organization-id])})
+
+(sv/defmethod ::remove-organization-member
+  "Remove an organization member from its teams and organization."
+  {::rpc/auth true
+   ::db/transaction true
+   ::sm/params [:map
+                [:organization-id ::sm/uuid]
+                [:member-id ::sm/uuid]]
+   ::sm/result :nil}
+  [{:keys [::db/conn ::mbus/msgbus] :as cfg}
+   {:keys [::rpc/profile-id organization-id member-id]}]
+  (assert-organization-owner! cfg profile-id organization-id)
+  (let [membership (db/get conn :organization-member-rel
+                           {:organization-id organization-id
+                            :profile-id member-id})]
+    (when-not membership
+      (ex/raise :type :not-found :code :organization-member-does-not-exist))
+    (when (= profile-id member-id)
+      (ex/raise :type :validation :code :cannot-remove-organization-owner))
+    (let [team-memberships (->> (db/query conn :organization-team-rel
+                                          {:organization-id organization-id})
+                                (keep (fn [{:keys [team-id]}]
+                                        (when-let [permissions (teams/get-permissions conn member-id team-id)]
+                                          {:id team-id :permissions permissions}))))]
+      (doseq [{:keys [id permissions]} team-memberships]
+        ;; The organization owner takes over the member's organization teams
+        ;; before removal, preserving access to any projects and files.
+        (when-not (teams/get-permissions conn profile-id id)
+          (teams/add-profile-to-team!
+           cfg
+           (perms/assign-role-flags {:profile-id profile-id :team-id id} :owner)
+           nil
+           {:actor-id profile-id}))
+        (teams/leave-team cfg (cond-> {:profile-id member-id :id id}
+                                (:is-owner permissions) (assoc :reassign-to profile-id))))
+      (doseq [{:keys [id]} team-memberships]
+        (mbus/pub! msgbus
+                   :topic member-id
+                   :message {:type :team-membership-change
+                             :change :removed
+                             :team-id id
+                             :team-name (:name (db/get conn :team {:id id}))}))
+      (db/delete! conn :organization-member-rel
+                  {:organization-id organization-id
+                   :profile-id member-id}))
+    (rph/with-meta (rph/wrap)
+      {::audit/name "delete-organization-member"
+       ::audit/props {:organization-id organization-id
+                      :member-id member-id
+                      :user-who-delete-member profile-id
+                      :deleted-by-role "organization-owner"}})))
 
 (def ^:private schema:subscription-warning
   [:maybe
