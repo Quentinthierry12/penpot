@@ -150,15 +150,15 @@
                               (load-organizations))
                             (fn [_]
                               (reset! message* "Supprimez ou déplacez les équipes avant de supprimer l’organisation.")))))))]
-    (mf/use-effect (fn [] (load-organizations) nil) [])
-    (mf/use-effect
-     (fn [] (when selected (reset! rename-name* (:name selected))) nil)
-     [selected])
-    (mf/use-effect
-     (fn []
-       (when @selected-id* (select-organization @selected-id*))
-       nil)
-     [@selected-id*])
+    (mf/with-effect []
+      (load-organizations)
+      nil)
+    (mf/with-effect [selected]
+      (when selected (reset! rename-name* (:name selected)))
+      nil)
+    (mf/with-effect [@selected-id*]
+      (when @selected-id* (select-organization @selected-id*))
+      nil)
     [:main {:style page-style}
      [:header {:style {:margin-bottom "28px"}}
       [:p {:style {:font-size "13px" :letter-spacing "0.08em" :text-transform "uppercase" :color "#686b78"}} "Administration Penpot"]
