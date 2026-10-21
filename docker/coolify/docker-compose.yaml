@@ -1,0 +1,169 @@
+# Déploiement de DEV du fork Penpot (branche enterprise-self-hosted) sur Coolify,
+# avec un Keycloak de test pour essayer le SSO d'organisation.
+#
+# - Images : construites par .github/workflows/fork-dev-images.yml (package GHCR « penpot-fork »).
+# - Ressource Coolify : application « Docker Compose » depuis le dépôt public,
+#   Base Directory /docker/coolify. Le script deploy-dev.ps1 la crée et la déploie.
+# - Variables fournies par le script : PENPOT_DEV_URL, KEYCLOAK_DEV_URL, SSO_TEST_EMAIL,
+#   PENPOT_IMAGE_TAG. Les secrets SERVICE_* sont générés par Coolify (onglet Environment Variables).
+# - Environnement jetable : pas de vraies données, pas de SMTP (les e-mails partent dans les logs).
+# - Les services sont préfixés « pdev- » pour ne jamais entrer en collision avec une autre
+#   instance Penpot gérée par le même Coolify.
+
+services:
+  pdev-frontend:
+    image: ghcr.io/quentinthierry12/penpot-fork:frontend-${PENPOT_IMAGE_TAG:-dev}
+    restart: unless-stopped
+    depends_on:
+      - pdev-backend
+      - pdev-exporter
+    volumes:
+      - penpot-assets:/opt/data/assets
+    environment:
+      PENPOT_FLAGS: "${PENPOT_FLAGS:-enable-registration enable-login-with-password disable-email-verification enable-admin-console}"
+      PENPOT_PUBLIC_URI: ${PENPOT_DEV_URL:?}
+      PENPOT_BACKEND_URI: http://pdev-backend:6060
+      PENPOT_EXPORTER_URI: http://pdev-exporter:6061
+      PENPOT_HTTP_SERVER_MAX_BODY_SIZE: 367001600
+      PENPOT_HTTP_SERVER_MAX_MULTIPART_BODY_SIZE: 367001600
+
+  pdev-backend:
+    image: ghcr.io/quentinthierry12/penpot-fork:backend-${PENPOT_IMAGE_TAG:-dev}
+    restart: unless-stopped
+    depends_on:
+      pdev-postgres:
+        condition: service_healthy
+      pdev-valkey:
+        condition: service_healthy
+    volumes:
+      - penpot-assets:/opt/data/assets
+    environment:
+      # enable-admin-console sans PENPOT_ADMIN_CONSOLE_URI = console d'administration locale du fork.
+      PENPOT_FLAGS: "${PENPOT_FLAGS:-enable-registration enable-login-with-password disable-email-verification enable-admin-console}"
+      PENPOT_PUBLIC_URI: ${PENPOT_DEV_URL:?}
+      PENPOT_SECRET_KEY: ${SERVICE_BASE64_64_PENPOTSECRET}
+      PENPOT_DATABASE_URI: postgresql://pdev-postgres/penpot
+      PENPOT_DATABASE_USERNAME: penpot
+      PENPOT_DATABASE_PASSWORD: ${SERVICE_PASSWORD_64_PENPOTDB}
+      PENPOT_REDIS_URI: redis://pdev-valkey/0
+      PENPOT_OBJECTS_STORAGE_BACKEND: fs
+      PENPOT_OBJECTS_STORAGE_FS_DIRECTORY: /opt/data/assets
+      PENPOT_HTTP_SERVER_MAX_BODY_SIZE: 367001600
+      PENPOT_HTTP_SERVER_MAX_MULTIPART_BODY_SIZE: 367001600
+      PENPOT_TELEMETRY_ENABLED: "false"
+
+  pdev-exporter:
+    image: ghcr.io/quentinthierry12/penpot-fork:exporter-${PENPOT_IMAGE_TAG:-dev}
+    restart: unless-stopped
+    depends_on:
+      pdev-valkey:
+        condition: service_healthy
+    environment:
+      PENPOT_FLAGS: "${PENPOT_FLAGS:-enable-registration enable-login-with-password disable-email-verification enable-admin-console}"
+      PENPOT_PUBLIC_URI: ${PENPOT_DEV_URL:?}
+      PENPOT_SECRET_KEY: ${SERVICE_BASE64_64_PENPOTSECRET}
+      PENPOT_INTERNAL_URI: http://pdev-frontend:8080
+      PENPOT_REDIS_URI: redis://pdev-valkey/0
+
+  pdev-postgres:
+    image: postgres:15
+    restart: unless-stopped
+    stop_signal: SIGINT
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U penpot"]
+      interval: 2s
+      timeout: 10s
+      retries: 5
+      start_period: 2s
+    volumes:
+      - penpot-postgres:/var/lib/postgresql/data
+    environment:
+      POSTGRES_INITDB_ARGS: --data-checksums
+      POSTGRES_DB: penpot
+      POSTGRES_USER: penpot
+      POSTGRES_PASSWORD: ${SERVICE_PASSWORD_64_PENPOTDB}
+
+  pdev-valkey:
+    image: valkey/valkey:8.1
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "valkey-cli ping | grep PONG"]
+      interval: 1s
+      timeout: 3s
+      retries: 5
+      start_period: 3s
+    environment:
+      VALKEY_EXTRA_FLAGS: --maxmemory 128mb --maxmemory-policy volatile-lfu
+
+  # IdP de test. Base de données éphémère : le realm est réimporté à chaque démarrage,
+  # avec les mêmes secrets (générés une fois par Coolify), donc l'état reste identique.
+  # Les ${...} du fichier de realm sont résolus par Keycloak depuis les variables ci-dessous.
+  pdev-keycloak:
+    image: quay.io/keycloak/keycloak:26.7.1
+    restart: unless-stopped
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_HOSTNAME: ${KEYCLOAK_DEV_URL:?}
+      KC_PROXY_HEADERS: xforwarded
+      KC_HTTP_ENABLED: "true"
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${SERVICE_PASSWORD_KEYCLOAKADMIN}
+      PENPOT_DEV_URL: ${PENPOT_DEV_URL:?}
+      SSO_TEST_EMAIL: ${SSO_TEST_EMAIL:?}
+      SERVICE_PASSWORD_KCCLIENT: ${SERVICE_PASSWORD_KCCLIENT}
+      SERVICE_PASSWORD_SSOTEST: ${SERVICE_PASSWORD_SSOTEST}
+    volumes:
+      - type: bind
+        source: ./keycloak/penpot-dev-realm.json
+        target: /opt/keycloak/data/import/penpot-dev-realm.json
+        content: |
+          {
+            "realm": "penpot-dev",
+            "displayName": "Penpot dev - SSO de test",
+            "enabled": true,
+            "sslRequired": "external",
+            "registrationAllowed": false,
+            "loginWithEmailAllowed": true,
+            "duplicateEmailsAllowed": false,
+            "resetPasswordAllowed": false,
+            "bruteForceProtected": true,
+            "clients": [
+              {
+                "clientId": "penpot",
+                "name": "Penpot (dev)",
+                "enabled": true,
+                "protocol": "openid-connect",
+                "publicClient": false,
+                "clientAuthenticatorType": "client-secret",
+                "secret": "${SERVICE_PASSWORD_KCCLIENT}",
+                "standardFlowEnabled": true,
+                "implicitFlowEnabled": false,
+                "directAccessGrantsEnabled": false,
+                "serviceAccountsEnabled": false,
+                "rootUrl": "${PENPOT_DEV_URL}",
+                "baseUrl": "/",
+                "redirectUris": ["${PENPOT_DEV_URL}/api/auth/oidc/callback"],
+                "webOrigins": ["${PENPOT_DEV_URL}"],
+                "attributes": {
+                  "post.logout.redirect.uris": "${PENPOT_DEV_URL}/*"
+                }
+              }
+            ],
+            "users": [
+              {
+                "username": "sso-test",
+                "email": "${SSO_TEST_EMAIL}",
+                "emailVerified": true,
+                "firstName": "SSO",
+                "lastName": "Test",
+                "enabled": true,
+                "credentials": [
+                  { "type": "password", "value": "${SERVICE_PASSWORD_SSOTEST}", "temporary": false }
+                ]
+              }
+            ]
+          }
+
+volumes:
+  penpot-postgres:
+  penpot-assets:
