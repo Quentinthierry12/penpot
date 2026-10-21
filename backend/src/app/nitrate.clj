@@ -161,9 +161,9 @@
 (defn- local-get-team-organization
   [cfg {:keys [team-id profile-id]}]
   (when-let [{:keys [organization-id]}
-             (db/get cfg :organization-team-rel {:team-id team-id})]
-    (when-let [organization (db/get cfg :organization {:id organization-id})]
-      (let [membership (db/get cfg :organization-member-rel
+             (db/get* cfg :organization-team-rel {:team-id team-id})]
+    (when-let [organization (db/get* cfg :organization {:id organization-id})]
+      (let [membership (db/get* cfg :organization-member-rel
                                {:organization-id organization-id
                                 :profile-id profile-id})]
         {:id team-id
@@ -182,8 +182,8 @@
 
 (defn- local-get-organization-membership
   [cfg {:keys [organization-id profile-id]}]
-  (when-let [organization (db/get cfg :organization {:id organization-id})]
-    (let [membership (db/get cfg :organization-member-rel
+  (when-let [organization (db/get* cfg :organization {:id organization-id})]
+    (let [membership (db/get* cfg :organization-member-rel
                              {:organization-id organization-id
                               :profile-id profile-id})]
       {:organization-id organization-id
@@ -193,14 +193,14 @@
 (defn- local-get-organization-membership-by-team
   [cfg {:keys [team-id profile-id]}]
   (when-let [{:keys [organization-id]}
-             (db/get cfg :organization-team-rel {:team-id team-id})]
+             (db/get* cfg :organization-team-rel {:team-id team-id})]
     (local-get-organization-membership cfg {:organization-id organization-id
                                             :profile-id profile-id})))
 
 (defn- local-get-organization-summary
   [cfg {:keys [organization-id profile-id]}]
-  (when-let [organization (db/get cfg :organization {:id organization-id})]
-    (let [default-team-id (some-> (db/get cfg :organization-member-rel
+  (when-let [organization (db/get* cfg :organization {:id organization-id})]
+    (let [default-team-id (some-> (db/get* cfg :organization-member-rel
                                           {:organization-id organization-id
                                            :profile-id profile-id})
                                   :default-team-id)
@@ -210,7 +210,7 @@
                               :is-your-penpot (= team-id default-team-id)})))]
       (-> (select-keys (decode-organization organization) [:id :name :slug :owner-id :logo-id :avatar-bg-url
                                     :permissions])
-          (assoc :sso-active (boolean (:is-active (db/get cfg :organization-sso
+          (assoc :sso-active (boolean (:is-active (db/get* cfg :organization-sso
                                                           {:organization-id organization-id})))
                  :teams teams)))))
 
@@ -296,7 +296,7 @@
     (when-let [organization-id (some-> (or (:organization-id event)
                                            (:organization-id props))
                                        uuid/coerce)]
-      (when (db/get cfg :organization {:id organization-id})
+      (when (db/get* cfg :organization {:id organization-id})
         (db/insert! cfg :organization-audit-log
                     {:id (or (some-> id uuid/coerce) (uuid/next))
                      :organization-id organization-id
@@ -309,14 +309,14 @@
 
 (defn- local-get-organization-permissions
   [cfg {:keys [organization-id]}]
-  (when-let [organization (db/get cfg :organization {:id organization-id})]
+  (when-let [organization (db/get* cfg :organization {:id organization-id})]
     {:organization-id organization-id
      :owner-id (:owner-id organization)
      :permissions (db/decode-json-pgobject (:permissions organization))}))
 
 (defn- local-get-organization-sso
   [cfg {:keys [organization-id]}]
-  (when-let [sso (db/get cfg :organization-sso {:organization-id organization-id})]
+  (when-let [sso (db/get* cfg :organization-sso {:organization-id organization-id})]
     {:organization-id organization-id
      :active (:is-active sso)
      :provider (:provider sso)
@@ -331,7 +331,7 @@
                 :client-id client-id
                 :client-secret (encrypt-organization-secret cfg client-secret)
                 :issuer issuer}]
-    (if (db/get cfg :organization-sso {:organization-id organization-id})
+    (if (db/get* cfg :organization-sso {:organization-id organization-id})
       (db/update! cfg :organization-sso values {:organization-id organization-id})
       (db/insert! cfg :organization-sso (assoc values :organization-id organization-id)))
     (local-get-organization-sso cfg {:organization-id organization-id})))
@@ -339,7 +339,7 @@
 (defn- local-get-organization-sso-by-team
   [cfg {:keys [team-id]}]
   (when-let [{:keys [organization-id]}
-             (db/get cfg :organization-team-rel {:team-id team-id})]
+             (db/get* cfg :organization-team-rel {:team-id team-id})]
     (local-get-organization-sso cfg {:organization-id organization-id})))
 
 (defn- local-set-team-organization

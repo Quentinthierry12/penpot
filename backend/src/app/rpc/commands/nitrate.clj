@@ -388,7 +388,7 @@
   [{:keys [::db/conn ::mbus/msgbus] :as cfg}
    {:keys [::rpc/profile-id organization-id member-id]}]
   (assert-organization-owner! cfg profile-id organization-id)
-  (let [membership (db/get conn :organization-member-rel
+  (let [membership (db/get* conn :organization-member-rel
                            {:organization-id organization-id
                             :profile-id member-id})]
     (when-not membership
