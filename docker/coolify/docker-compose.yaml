@@ -65,8 +65,9 @@ services:
       PENPOT_INTERNAL_URI: http://pdev-frontend:8080
       PENPOT_REDIS_URI: redis://pdev-valkey/0
 
+  # PostgreSQL 16 minimum : la migration Penpot 0156 utilise « SET STORAGE DEFAULT ».
   pdev-postgres:
-    image: postgres:15
+    image: postgres:17
     restart: unless-stopped
     stop_signal: SIGINT
     healthcheck:
@@ -76,7 +77,7 @@ services:
       retries: 5
       start_period: 2s
     volumes:
-      - penpot-postgres:/var/lib/postgresql/data
+      - penpot-postgres-17:/var/lib/postgresql/data
     environment:
       POSTGRES_INITDB_ARGS: --data-checksums
       POSTGRES_DB: penpot
@@ -165,5 +166,5 @@ services:
           }
 
 volumes:
-  penpot-postgres:
+  penpot-postgres-17:
   penpot-assets:
