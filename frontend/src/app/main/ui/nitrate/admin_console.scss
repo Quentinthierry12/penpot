@@ -1,0 +1,317 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+@use "ds/typography.scss" as t;
+@use "ds/_borders.scss" as *;
+@use "ds/_utils.scss" as *;
+@use "ds/mixins.scss" as *;
+
+.console {
+  @include custom-scrollbar;
+
+  block-size: 100vh;
+  overflow-y: auto;
+  background-color: var(--color-background-secondary);
+  color: var(--color-foreground-primary);
+}
+
+.console-inner {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-xxl);
+  max-inline-size: px2rem(1200);
+  margin-inline: auto;
+  padding: var(--sp-xxxl) var(--sp-xxl);
+
+  @media (width <= 600px) {
+    padding: var(--sp-xl) var(--sp-l);
+  }
+}
+
+.header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--sp-l);
+}
+
+.header-text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-xs);
+}
+
+.eyebrow {
+  color: var(--color-accent-primary);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.title,
+.card-title,
+.panel-title {
+  color: var(--color-foreground-primary);
+  overflow-wrap: anywhere;
+}
+
+.muted {
+  color: var(--color-foreground-secondary);
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: minmax(px2rem(260), px2rem(320)) minmax(0, 1fr);
+  gap: var(--sp-xxl);
+  align-items: start;
+
+  @media (width <= 900px) {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.sidebar,
+.content,
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-l);
+  min-inline-size: 0;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-l);
+  padding: var(--sp-xxl);
+  border: $b-1 solid var(--color-background-quaternary);
+  border-radius: $br-8;
+  background-color: var(--color-background-primary);
+
+  @media (width <= 600px) {
+    padding: var(--sp-l);
+  }
+}
+
+.empty {
+  align-items: center;
+  justify-content: center;
+  min-block-size: px2rem(160);
+  text-align: center;
+}
+
+.danger {
+  border-color: var(--color-accent-error);
+}
+
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-s);
+}
+
+.notice {
+  inline-size: 100%;
+}
+
+.organization-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-xs);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.organization-item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-xxs);
+  inline-size: 100%;
+  padding: var(--sp-m);
+  border: $b-1 solid transparent;
+  border-radius: $br-8;
+  background: none;
+  color: var(--color-foreground-primary);
+  text-align: start;
+  cursor: pointer;
+
+  &:hover {
+    background-color: var(--color-background-quaternary);
+  }
+
+  &:focus-visible {
+    outline: $b-2 solid var(--color-accent-primary);
+  }
+}
+
+.selected {
+  border-color: var(--color-accent-primary);
+  background-color: var(--color-background-quaternary);
+}
+
+.organization-name {
+  @include t.use-typography("body-large");
+  @include text-ellipsis;
+
+  max-inline-size: 100%;
+}
+
+.organization-meta {
+  @include t.use-typography("body-small");
+
+  color: var(--color-foreground-secondary);
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-l);
+}
+
+.form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--sp-s);
+}
+
+.inline-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--sp-s);
+}
+
+.inline-input {
+  flex: 1 1 px2rem(200);
+}
+
+.fields-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(px2rem(240), 1fr));
+  gap: var(--sp-l);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-xs);
+  min-inline-size: 0;
+}
+
+.field-label {
+  color: var(--color-foreground-secondary);
+}
+
+.badge {
+  @include t.use-typography("body-small");
+
+  padding: var(--sp-xxs) var(--sp-s);
+  border: $b-1 solid var(--color-background-quaternary);
+  border-radius: $br-12;
+  color: var(--color-foreground-secondary);
+  white-space: nowrap;
+}
+
+.badge-on {
+  border-color: var(--color-accent-primary);
+  color: var(--color-accent-primary);
+}
+
+.callout {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-xs);
+  padding: var(--sp-m);
+  border-radius: $br-8;
+  background-color: var(--color-background-quaternary);
+  color: var(--color-foreground-primary);
+}
+
+.code {
+  @include t.use-typography("code-font");
+
+  color: var(--color-foreground-primary);
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.code-block {
+  @include t.use-typography("code-font");
+
+  margin: var(--sp-xs) 0 0;
+  padding: var(--sp-s);
+  border-radius: $br-4;
+  background-color: var(--color-background-quaternary);
+  color: var(--color-foreground-primary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.panel-header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-xs);
+}
+
+.rows {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.row,
+.audit-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-s);
+  padding-block: var(--sp-s);
+  border-block-end: $b-1 solid var(--color-background-quaternary);
+
+  &:last-child {
+    border-block-end: none;
+  }
+}
+
+.audit-row {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.row-text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-xxs);
+  min-inline-size: 0;
+}
+
+.row-title {
+  @include t.use-typography("body-medium");
+
+  color: var(--color-foreground-primary);
+  overflow-wrap: anywhere;
+}
+
+.row-meta {
+  @include t.use-typography("body-small");
+
+  color: var(--color-foreground-secondary);
+  overflow-wrap: anywhere;
+}
+
+.audit-details {
+  @include t.use-typography("body-small");
+
+  color: var(--color-foreground-secondary);
+
+  summary {
+    cursor: pointer;
+  }
+}
